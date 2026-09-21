@@ -161,8 +161,32 @@ static int step_reboot_to_recovery(device_info_t *dev)
 static int step_manipulate_identity(device_info_t *dev)
 {
     int rc;
+    irecv_client_t client = NULL;
+    irecv_error_t err;
 
     log_info("[path_b] Step 2/10: Manipulating device identity in recovery mode...");
+
+    /* Recovery-mode identity reads must not reuse a stale DFU handle from
+     * the previous step. Re-open a fresh iRecovery connection so the serial
+     * descriptor read/write uses a live USB endpoint instead of a dead pointer.
+     */
+    if (dev->usb) {
+        usb_dfu_close(dev->usb);
+        dev->usb = NULL;
+    }
+
+    if (dev->ecid != 0)
+        err = irecv_open_with_ecid_and_attempts(&client, (uint64_t)dev->ecid, 5);
+    else
+        err = irecv_open_with_ecid_and_attempts(&client, 0, 5);
+
+    if (err != IRECV_E_SUCCESS || !client) {
+        log_warn("[path_b] Fresh recovery USB handle could not be opened: %s",
+                 irecv_strerror(err));
+    } else {
+        irecv_close(client);
+        client = NULL;
+    }
 
     rc = path_b_manipulate_identity(dev);
     if (rc != 0) {

@@ -136,6 +136,36 @@ test_path_b_e2e_identity_manipulation_succeeds(void)
  * "Unactivated" -- the tool must not mask the barrier.
  */
 static void
+test_path_b_e2e_identity_manipulation_recovery_mode_succeeds(void)
+{
+    device_info_t dev;
+    const char *current_serial =
+        "CPID:8020 CPRV:11 ECID:0022334455667788";
+    int rc;
+    size_t i;
+    int found_pwnd = 0;
+
+    printf("  [e2e] path_b identity manipulation (recovery mode)\n");
+
+    mock_reset_all();
+    dev = e2e_make_device_path_b_cellular();
+    dev.usb = NULL;
+    mock_irecv_set_device_info(0x1281, dev.ecid, current_serial);
+
+    rc = path_b_manipulate_identity(&dev);
+    ASSERT_EQ(rc, 0);
+
+    for (i = 0; i < mock_get_call_count(); i++) {
+        const char *line = mock_get_call_log(i);
+        if (!line) continue;
+        if (strstr(line, "irecv_setenv(serial-number") &&
+            strstr(line, "PWND:[checkm8]"))
+            found_pwnd = 1;
+    }
+    ASSERT_EQ(found_pwnd, 1);
+}
+
+static void
 test_path_b_e2e_activation_rejected_by_nonce_barrier(void)
 {
     device_info_t dev;
@@ -220,6 +250,7 @@ run_path_b_integration_tests(void)
 {
     printf("--- Section 11: Path B end-to-end integration ---\n");
     test_path_b_e2e_identity_manipulation_succeeds();
+    test_path_b_e2e_identity_manipulation_recovery_mode_succeeds();
     test_path_b_e2e_activation_rejected_by_nonce_barrier();
     test_path_b_e2e_signal_detection_cellular_vs_wifi();
 }

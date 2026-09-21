@@ -333,10 +333,11 @@ int path_b_manipulate_identity(device_info_t *dev)
         return -1;
     }
 
-    if (!dev->usb) {
-        log_error("[path_b_id] No USB handle for DFU mode");
-        return -1;
-    }
+    /* Recovery-mode Path B is valid without a live DFU USB handle:
+     * step_reboot_to_recovery() closes the DFU handle and clears the
+     * device state before iRecovery reads/writes the serial-number env.
+     * Let path_b_read_serial() decide whether to talk USB-DFU or iRecovery.
+     */
 
     /* Step 1: read current serial */
     log_info("[path_b_id] Reading current serial descriptor...");

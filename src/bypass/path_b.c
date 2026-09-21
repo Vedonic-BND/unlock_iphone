@@ -154,37 +154,42 @@ static int step_reboot_to_recovery(device_info_t *dev)
 }
 
 /*
- * refresh_recovery_usb_handle -- Force a fresh libusb handle for the device
- * after the DFU abort / recovery re-enumeration. This prevents stale DFU
- * pointers from being reused while the device is already in recovery mode.
+ * force_recovery_reenumeration -- Force a fresh USB discovery cycle after
+ * the DFU -> recovery transition. It opens a temporary handle only for the
+ * re-enumeration check and then closes it immediately so dev->usb remains NULL.
+ * Keeping dev->usb NULL is essential because path_b_read_serial() treats any
+ * non-NULL handle as a DFU USB descriptor read instead of a recovery-mode
+ * iRecovery read.
  */
-static int refresh_recovery_usb_handle(device_info_t *dev)
+static void force_recovery_reenumeration(device_info_t *dev)
 {
     libusb_context *ctx = NULL;
     libusb_device **devs = NULL;
     ssize_t count;
     ssize_t i;
-    int opened = 0;
+    libusb_device_handle *tmp = NULL;
 
     if (!dev)
-        return -1;
+        return;
 
+    /* Reset the stale DFU pointer before re-enumeration. */
     if (dev->usb) {
         usb_dfu_close(dev->usb);
         dev->usb = NULL;
     }
+    dev->is_dfu_mode = 0;
 
     if (libusb_init(&ctx) != LIBUSB_SUCCESS) {
-        log_error("[path_b] libusb_init failed while re-opening recovery USB handle");
-        return -1;
+        log_warn("[path_b] libusb_init failed during recovery re-enumeration refresh");
+        return;
     }
 
     count = libusb_get_device_list(ctx, &devs);
     if (count < 0) {
-        log_error("[path_b] libusb_get_device_list failed during recovery re-open: %s",
-                  libusb_strerror((int)count));
+        log_warn("[path_b] libusb_get_device_list failed during recovery refresh: %s",
+                 libusb_strerror((int)count));
         libusb_exit(ctx);
-        return -1;
+        return;
     }
 
     for (i = 0; i < count; i++) {
@@ -194,29 +199,18 @@ static int refresh_recovery_usb_handle(device_info_t *dev)
 
         if (desc.idVendor == APPLE_VID_PATH_B &&
             desc.idProduct == RECOVERY_PID_PATH_B) {
-            int rc = libusb_open(devs[i], &dev->usb);
-            if (rc == LIBUSB_SUCCESS) {
-                dev->is_dfu_mode = 0;
-                dev->iserial_index = desc.iSerialNumber;
-                opened = 1;
-                log_info("[path_b] Opened fresh recovery USB handle (PID 0x%04X, iSerial=%u)",
-                         RECOVERY_PID_PATH_B, (unsigned)desc.iSerialNumber);
+            if (libusb_open(devs[i], &tmp) == LIBUSB_SUCCESS) {
+                log_debug("[path_b] Recovery re-enumeration refresh succeeded (PID 0x%04X)",
+                          RECOVERY_PID_PATH_B);
+                libusb_close(tmp);
+                tmp = NULL;
                 break;
             }
-            log_warn("[path_b] libusb_open recovery handle failed: %s",
-                     libusb_strerror(rc));
         }
     }
 
     libusb_free_device_list(devs, 1);
     libusb_exit(ctx);
-
-    if (!opened) {
-        log_error("[path_b] No live recovery USB handle available after re-enumeration");
-        return -1;
-    }
-
-    return 0;
 }
 
 /*
@@ -230,12 +224,11 @@ static int step_manipulate_identity(device_info_t *dev)
 
     log_info("[path_b] Step 2/10: Manipulating device identity in recovery mode...");
 
-    /* Force a fresh USB handle before reading the serial. The device has
-     * already re-enumerated from DFU into recovery, so any cached DFU pointer
-     * is stale and may point to a dead endpoint. */
-    if (refresh_recovery_usb_handle(dev) != 0) {
-        log_warn("[path_b] Continuing with recovery identity flow after USB refresh failure");
-    }
+    /* Force a fresh USB discovery cycle but keep the device state as recovery,
+     * not DFU. This avoids stale DFU pointers while ensuring path_b_read_serial()
+     * falls through to the recovery-mode iRecovery path instead of the stale
+     * USB descriptor path. */
+    force_recovery_reenumeration(dev);
 
     rc = path_b_manipulate_identity(dev);
     if (rc != 0) {

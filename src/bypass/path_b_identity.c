@@ -195,51 +195,58 @@ int path_b_read_serial(device_info_t *dev, char *buf, size_t len)
     }
 
     /* Recovery mode: prefer the live serial-number environment variable.
-     * irecv_get_device_info() may return stale cached serial data even after
-     * setenv serial-number succeeded, so read the environment directly and
-     * fall back to device_info only if the variable is unavailable.
+     * On real A12+ devices the serial value may remain cached in iBoot for a
+     * short time after setenv, so retry across fresh iRecovery connections.
      */
     {
-        irecv_client_t client = NULL;
-        irecv_error_t  err;
-        const struct irecv_device_info *info;
-        char *env_value = NULL;
+        int attempt;
+        for (attempt = 0; attempt < 3; attempt++) {
+            irecv_client_t client = NULL;
+            irecv_error_t  err;
+            const struct irecv_device_info *info;
+            char *env_value = NULL;
 
-        if (dev->ecid != 0)
-            err = irecv_open_with_ecid_and_attempts(&client,
-                                                    (uint64_t)dev->ecid, 5);
-        else
-            err = irecv_open_with_ecid_and_attempts(&client, 0, 5);
+            if (dev->ecid != 0)
+                err = irecv_open_with_ecid_and_attempts(&client,
+                                                        (uint64_t)dev->ecid, 5);
+            else
+                err = irecv_open_with_ecid_and_attempts(&client, 0, 5);
 
-        if (err != IRECV_E_SUCCESS || !client) {
-            log_error("[path_b_id] iRecovery open failed for serial read: %s",
-                      irecv_strerror(err));
-            return -1;
-        }
+            if (err != IRECV_E_SUCCESS || !client) {
+                log_error("[path_b_id] iRecovery open failed for serial read: %s",
+                          irecv_strerror(err));
+                return -1;
+            }
 
-        err = irecv_getenv(client, "serial-number", &env_value);
-        if (err == IRECV_E_SUCCESS && env_value && env_value[0] != '\0') {
-            strncpy(buf, env_value, len - 1);
-            buf[len - 1] = '\0';
+            err = irecv_getenv(client, "serial-number", &env_value);
+            if (err == IRECV_E_SUCCESS && env_value && env_value[0] != '\0') {
+                strncpy(buf, env_value, len - 1);
+                buf[len - 1] = '\0';
+                free(env_value);
+                irecv_close(client);
+                log_debug("[path_b_id] Read serial (recovery, getenv, attempt %d): %s",
+                          attempt + 1, buf);
+                return 0;
+            }
+
             free(env_value);
-            log_debug("[path_b_id] Read serial (recovery, getenv): %s", buf);
+            info = irecv_get_device_info(client);
+            if (info && info->serial_string && info->serial_string[0] != '\0') {
+                strncpy(buf, info->serial_string, len - 1);
+                buf[len - 1] = '\0';
+                irecv_close(client);
+                log_debug("[path_b_id] Read serial (recovery, device_info, attempt %d): %s",
+                          attempt + 1, buf);
+                return 0;
+            }
+
             irecv_close(client);
-            return 0;
+            if (attempt + 1 < 3)
+                usleep(500000); /* let recovery NVRAM settle before retry */
         }
 
-        free(env_value);
-        info = irecv_get_device_info(client);
-        if (!info || !info->serial_string || info->serial_string[0] == '\0') {
-            log_error("[path_b_id] iRecovery: no serial string available");
-            irecv_close(client);
-            return -1;
-        }
-
-        strncpy(buf, info->serial_string, len - 1);
-        buf[len - 1] = '\0';
-        log_debug("[path_b_id] Read serial (recovery, device_info): %s", buf);
-        irecv_close(client);
-        return 0;
+        log_error("[path_b_id] iRecovery: no serial string available after retries");
+        return -1;
     }
 }
 
